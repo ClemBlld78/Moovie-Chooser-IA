@@ -179,4 +179,36 @@ def moteur_recommandation(demande_genres, demande_dates, demande_acteur, df_bibl
 <div style='display: flex; background: #222; color: white; border-radius: 8px; overflow: hidden; font-family: sans-serif; box-shadow: 0 4px 8px rgba(0,0,0,0.3); margin-bottom: 15px;'>
 <img src='{row['poster']}' style='width: 100px; object-fit: cover;' />
 <div style='padding: 15px;'>
-<h3 style='
+<h3 style='margin: 0 0 5px 0; color: #4db8ff; font-size: 1.2em;'>{row['titre']} <span style='color:#aaa; font-size: 0.8em;'>({row['date']})</span></h3>
+<p style='margin: 0 0 10px 0; font-size: 13px; color: #ccc;'>
+🏆 <b>Score Global : {row['score_final']:.2f}</b>  
+<span style='color:#888; margin-left:10px;'>(IA: {row['affinité_ia']:.2f} + Public: {row['note']}/10)</span>
+</p>
+<p style='margin: 0; font-size: 12px; line-height: 1.4; color: #ddd;'>{row['resume_court']}</p>
+</div>
+</div>
+"""
+    return html
+
+# --- INTERFACE UTILISATEUR STREAMLIT ---
+st.title("🎬 Ton Conseiller Cinéma IA")
+st.markdown("Trouve le film parfait basé sur **ton ADN Letterboxd**.")
+
+df_biblio_full, liste_deja_vus = preparer_bibliotheque()
+
+if df_biblio_full is not None:
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        text_genres = st.text_input("🎭 Genre :", placeholder="Ex: SF, Thriller...")
+    with col2:
+        text_dates = st.text_input("📅 Période :", placeholder="Ex: années 2000...")
+    with col3:
+        text_acteur = st.text_input("🌟 Acteur :", placeholder="Ex: Brad Pitt")
+    
+    if st.button("🎥 Trouver mon film", type="primary", use_container_width=True):
+        if text_genres.strip() or text_dates.strip() or text_acteur.strip():
+            with st.spinner("🍿 L'IA analyse la base de données..."):
+                html_result = moteur_recommandation(text_genres, text_dates, text_acteur, df_biblio_full, liste_deja_vus)
+                st.markdown(html_result, unsafe_allow_html=True)
+        else:
+            st.warning("⚠️ Veuillez remplir au moins l'une des cases !")
