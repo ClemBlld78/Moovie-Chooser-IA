@@ -29,19 +29,13 @@ GENRES_TMDB = {
     "western": 37
 }
 
-# --- FONCTION DE NETTOYAGE DES TITRES (ANTI-DOUBLONS) ---
 def nettoyer_titre(titre):
-    if not isinstance(titre, str):
-        return ""
-    # On met en minuscules
+    if not isinstance(titre, str): return ""
     t = titre.lower().strip()
-    # On retire les accents (é -> e, à -> a)
     t = unicodedata.normalize('NFKD', t).encode('ASCII', 'ignore').decode('utf-8')
-    # On retire la ponctuation (garde uniquement les lettres et chiffres)
     t = re.sub(r'[^\w\s]', '', t)
     return t
 
-# --- FONCTION DE CHARGEMENT ET MISE À JOUR ---
 @st.cache_data(ttl=3600, show_spinner="Synchronisation avec Letterboxd...") 
 def preparer_bibliotheque():
     URL_RSS = f"https://letterboxd.com/{PSEUDO_LETTERBOXD}/rss/"
@@ -88,7 +82,6 @@ def preparer_bibliotheque():
     return pd.DataFrame(ma_bibliotheque), liste_deja_vus
 
 
-# --- LE MOTEUR DE RECOMMANDATION ---
 def moteur_recommandation(demande_genres, demande_dates, demande_acteur, df_biblio, liste_deja_vus):
     demande_genres_lower = demande_genres.lower()
     ids_trouves = [str(GENRES_TMDB[mot]) for mot in GENRES_TMDB if mot in demande_genres_lower]
@@ -130,10 +123,10 @@ def moteur_recommandation(demande_genres, demande_dates, demande_acteur, df_bibl
         params['page'] = page
         res = discover.movie(**params)
         for film in res['results']:
-            # Utilisation du nouveau nettoyeur pour comparer les titres !
             titre_fr = nettoyer_titre(film.get('title', ''))
             titre_vo = nettoyer_titre(film.get('original_title', ''))
             
+            # Filtre par nom classique
             if titre_fr in liste_deja_vus or titre_vo in liste_deja_vus: 
                 continue
                 
@@ -157,47 +150,33 @@ def moteur_recommandation(demande_genres, demande_dates, demande_acteur, df_bibl
     tfidf_matrix = vectorizer.fit_transform(df_biblio['metadata'].tolist() + df_cand['desc'].tolist())
     v_biblio, v_cand = tfidf_matrix[:len(df_biblio)], tfidf_matrix[len(df_biblio):]
     
-    df_cand['affinité_ia'] = [sum(cosine_similarity(v_cand[i], v_biblio)[0] * (df_biblio['ma_note'] - 2.5)) for i in range(v_cand.shape[0])]
+    # --- LE BOUCLIER ANTI-DOUBLON ULTIME (ADN DU FILM) ---
+    similarites = cosine_similarity(v_cand, v_biblio)
+    scores_ia = []
+    doublons_indices = []
+    
+    for i in range(v_cand.shape[0]):
+        # Si le résumé et les mots-clés du film correspondent à plus de 95% à un film de ta base, c'est le même !
+        if len(similarites[i]) > 0 and max(similarites[i]) > 0.95:
+            doublons_indices.append(i)
+            scores_ia.append(-999) 
+        else:
+            scores_ia.append(sum(similarites[i] * (df_biblio['ma_note'] - 2.5)))
+            
+    df_cand['affinité_ia'] = scores_ia
+    # On supprime purement et simplement les doublons cachés détectés par l'IA
+    df_cand = df_cand.drop(doublons_indices)
+    
+    if df_cand.empty:
+        return "<p>⚠️ Tous les films trouvés ont en fait déjà été vus (malgré des titres différents) !</p>"
+        
     df_cand['score_final'] = df_cand['affinité_ia'] + (df_cand['note'] * 0.2)
     df_final = df_cand.sort_values(by='score_final', ascending=False).head(10)
     
-    # Correction du bloc HTML (suppression de l'indentation)
     html = ""
     for _, row in df_final.iterrows():
         html += f"""
 <div style='display: flex; background: #222; color: white; border-radius: 8px; overflow: hidden; font-family: sans-serif; box-shadow: 0 4px 8px rgba(0,0,0,0.3); margin-bottom: 15px;'>
 <img src='{row['poster']}' style='width: 100px; object-fit: cover;' />
 <div style='padding: 15px;'>
-<h3 style='margin: 0 0 5px 0; color: #4db8ff; font-size: 1.2em;'>{row['titre']} <span style='color:#aaa; font-size: 0.8em;'>({row['date']})</span></h3>
-<p style='margin: 0 0 10px 0; font-size: 13px; color: #ccc;'>
-🏆 <b>Score Global : {row['score_final']:.2f}</b>  
-<span style='color:#888; margin-left:10px;'>(IA: {row['affinité_ia']:.2f} + Public: {row['note']}/10)</span>
-</p>
-<p style='margin: 0; font-size: 12px; line-height: 1.4; color: #ddd;'>{row['resume_court']}</p>
-</div>
-</div>
-"""
-    return html
-
-# --- INTERFACE UTILISATEUR STREAMLIT ---
-st.title("🎬 Ton Conseiller Cinéma IA")
-st.markdown("Trouve le film parfait basé sur **ton ADN Letterboxd**.")
-
-df_biblio_full, liste_deja_vus = preparer_bibliotheque()
-
-if df_biblio_full is not None:
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        text_genres = st.text_input("🎭 Genre :", placeholder="Ex: SF, Thriller...")
-    with col2:
-        text_dates = st.text_input("📅 Période :", placeholder="Ex: années 2000...")
-    with col3:
-        text_acteur = st.text_input("🌟 Acteur :", placeholder="Ex: Brad Pitt")
-    
-    if st.button("🎥 Trouver mon film", type="primary", use_container_width=True):
-        if text_genres.strip() or text_dates.strip() or text_acteur.strip():
-            with st.spinner("🍿 L'IA analyse la base de données..."):
-                html_result = moteur_recommandation(text_genres, text_dates, text_acteur, df_biblio_full, liste_deja_vus)
-                st.markdown(html_result, unsafe_allow_html=True)
-        else:
-            st.warning("⚠️ Veuillez remplir au moins l'une des cases !")
+<h3 style='
