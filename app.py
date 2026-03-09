@@ -6,6 +6,7 @@ import pickle
 import requests
 import pandas as pd
 import tmdbsimple as tmdb
+import unicodedata
 from bs4 import BeautifulSoup
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
@@ -28,13 +29,24 @@ GENRES_TMDB = {
     "western": 37
 }
 
+# --- FONCTION DE NETTOYAGE DES TITRES (ANTI-DOUBLONS) ---
+def nettoyer_titre(titre):
+    if not isinstance(titre, str):
+        return ""
+    # On met en minuscules
+    t = titre.lower().strip()
+    # On retire les accents (é -> e, à -> a)
+    t = unicodedata.normalize('NFKD', t).encode('ASCII', 'ignore').decode('utf-8')
+    # On retire la ponctuation (garde uniquement les lettres et chiffres)
+    t = re.sub(r'[^\w\s]', '', t)
+    return t
+
 # --- FONCTION DE CHARGEMENT ET MISE À JOUR ---
 @st.cache_data(ttl=3600, show_spinner="Synchronisation avec Letterboxd...") 
 def preparer_bibliotheque():
     URL_RSS = f"https://letterboxd.com/{PSEUDO_LETTERBOXD}/rss/"
     ma_bibliotheque = []
     
-    # 1. On charge ton fichier .pkl uploadé sur GitHub
     if os.path.exists(CHEMIN_CACHE):
         with open(CHEMIN_CACHE, 'rb') as f:
             df_biblio_full = pickle.load(f)
@@ -43,11 +55,10 @@ def preparer_bibliotheque():
         st.error("❌ Fichier bibliotheque_ia_cache.pkl introuvable sur le GitHub.")
         return None, None
 
-    # 2. On vérifie les nouveautés via RSS
     try:
         r = requests.get(URL_RSS)
         soup = BeautifulSoup(r.content, "xml")
-        titres_en_cache = [str(film['titre']).lower().strip() for film in ma_bibliotheque]
+        titres_en_cache = [nettoyer_titre(film['titre']) for film in ma_bibliotheque]
         films_a_ajouter = []
         
         for item in soup.find_all("item"):
@@ -57,10 +68,9 @@ def preparer_bibliotheque():
             
             if title_tag and rating_tag:
                 titre = title_tag.text
-                if titre.lower().strip() not in titres_en_cache:
+                if nettoyer_titre(titre) not in titres_en_cache:
                     films_a_ajouter.append({"Name": titre, "Year": year_tag.text if year_tag else "", "Rating": float(rating_tag.text)})
                     
-        # 3. Traitement des nouveautés à la volée
         if len(films_a_ajouter) > 0:
             for film in films_a_ajouter:
                 try:
@@ -72,9 +82,9 @@ def preparer_bibliotheque():
                         ma_bibliotheque.append({'titre': film['Name'], 'metadata': f"{info.get('overview', '')} {info.get('genres', '')} {kw}", 'ma_note': float(film['Rating'])})
                 except: continue
     except:
-        pass # Si Letterboxd bug, on utilise quand même le cache existant
+        pass 
 
-    liste_deja_vus = [str(film['titre']).lower().strip() for film in ma_bibliotheque]
+    liste_deja_vus = [nettoyer_titre(film['titre']) for film in ma_bibliotheque]
     return pd.DataFrame(ma_bibliotheque), liste_deja_vus
 
 
@@ -96,10 +106,6 @@ def moteur_recommandation(demande_genres, demande_dates, demande_acteur, df_bibl
     elif re.search(r'\b(19\d{2}|20\d{2})\b', demande_dates_lower):
         annee = re.search(r'\b(19\d{2}|20\d{2})\b', demande_dates_lower).group(1)
         date_gte, date_lte = f"{annee}-01-01", f"{annee}-12-31"
-    elif re.search(r'\b(70|80|90)\b', demande_dates_lower):
-        if "70" in demande_dates_lower: date_gte, date_lte = "1970-01-01", "1979-12-31"
-        elif "80" in demande_dates_lower: date_gte, date_lte = "1980-01-01", "1989-12-31"
-        elif "90" in demande_dates_lower: date_gte, date_lte = "1990-01-01", "1999-12-31"
 
     acteur_id = None
     if demande_acteur.strip():
@@ -124,7 +130,13 @@ def moteur_recommandation(demande_genres, demande_dates, demande_acteur, df_bibl
         params['page'] = page
         res = discover.movie(**params)
         for film in res['results']:
-            if film.get('title', '').lower().strip() in liste_deja_vus or film.get('original_title', '').lower().strip() in liste_deja_vus: continue
+            # Utilisation du nouveau nettoyeur pour comparer les titres !
+            titre_fr = nettoyer_titre(film.get('title', ''))
+            titre_vo = nettoyer_titre(film.get('original_title', ''))
+            
+            if titre_fr in liste_deja_vus or titre_vo in liste_deja_vus: 
+                continue
+                
             try:
                 info = tmdb.Movies(film['id']).info(language='fr-FR')
                 kw = " ".join([k['name'] for k in tmdb.Movies(film['id']).keywords().get('keywords', [])])
@@ -149,22 +161,22 @@ def moteur_recommandation(demande_genres, demande_dates, demande_acteur, df_bibl
     df_cand['score_final'] = df_cand['affinité_ia'] + (df_cand['note'] * 0.2)
     df_final = df_cand.sort_values(by='score_final', ascending=False).head(10)
     
-    html = "<div style='display: flex; flex-direction: column; gap: 15px; margin-top:10px;'>"
+    # Correction du bloc HTML (suppression de l'indentation)
+    html = ""
     for _, row in df_final.iterrows():
         html += f"""
-        <div style='display: flex; background: #222; color: white; border-radius: 8px; overflow: hidden; font-family: sans-serif; box-shadow: 0 4px 8px rgba(0,0,0,0.3);'>
-            <img src='{row['poster']}' style='width: 100px; object-fit: cover;' />
-            <div style='padding: 15px;'>
-                <h3 style='margin: 0 0 5px 0; color: #4db8ff; font-size: 1.2em;'>{row['titre']} <span style='color:#aaa; font-size: 0.8em;'>({row['date']})</span></h3>
-                <p style='margin: 0 0 10px 0; font-size: 13px; color: #ccc;'>
-                    🏆 <b>Score Global : {row['score_final']:.2f}</b>  
-                    <span style='color:#888; margin-left:10px;'>(IA: {row['affinité_ia']:.2f} + Public: {row['note']}/10)</span>
-                </p>
-                <p style='margin: 0; font-size: 12px; line-height: 1.4; color: #ddd;'>{row['resume_court']}</p>
-            </div>
-        </div>
-        """
-    html += "</div>"
+<div style='display: flex; background: #222; color: white; border-radius: 8px; overflow: hidden; font-family: sans-serif; box-shadow: 0 4px 8px rgba(0,0,0,0.3); margin-bottom: 15px;'>
+<img src='{row['poster']}' style='width: 100px; object-fit: cover;' />
+<div style='padding: 15px;'>
+<h3 style='margin: 0 0 5px 0; color: #4db8ff; font-size: 1.2em;'>{row['titre']} <span style='color:#aaa; font-size: 0.8em;'>({row['date']})</span></h3>
+<p style='margin: 0 0 10px 0; font-size: 13px; color: #ccc;'>
+🏆 <b>Score Global : {row['score_final']:.2f}</b>  
+<span style='color:#888; margin-left:10px;'>(IA: {row['affinité_ia']:.2f} + Public: {row['note']}/10)</span>
+</p>
+<p style='margin: 0; font-size: 12px; line-height: 1.4; color: #ddd;'>{row['resume_court']}</p>
+</div>
+</div>
+"""
     return html
 
 # --- INTERFACE UTILISATEUR STREAMLIT ---
@@ -174,7 +186,6 @@ st.markdown("Trouve le film parfait basé sur **ton ADN Letterboxd**.")
 df_biblio_full, liste_deja_vus = preparer_bibliotheque()
 
 if df_biblio_full is not None:
-    # Les 3 champs de recherche alignés
     col1, col2, col3 = st.columns(3)
     with col1:
         text_genres = st.text_input("🎭 Genre :", placeholder="Ex: SF, Thriller...")
@@ -183,7 +194,6 @@ if df_biblio_full is not None:
     with col3:
         text_acteur = st.text_input("🌟 Acteur :", placeholder="Ex: Brad Pitt")
     
-    # Le bouton
     if st.button("🎥 Trouver mon film", type="primary", use_container_width=True):
         if text_genres.strip() or text_dates.strip() or text_acteur.strip():
             with st.spinner("🍿 L'IA analyse la base de données..."):
